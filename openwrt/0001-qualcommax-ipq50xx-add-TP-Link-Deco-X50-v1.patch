@@ -1,0 +1,777 @@
+diff --git a/package/boot/uboot-tools/uboot-envtools/files/qualcommax_ipq50xx b/package/boot/uboot-tools/uboot-envtools/files/qualcommax_ipq50xx
+index c0aef88..2ecba19 100644
+--- a/package/boot/uboot-tools/uboot-envtools/files/qualcommax_ipq50xx
++++ b/package/boot/uboot-tools/uboot-envtools/files/qualcommax_ipq50xx
+@@ -22,6 +22,7 @@ zyxel,scr50axe)
+ 	;;
+ glinet,gl-b3000|\
+ tplink,archer-ax55-v1|\
++tplink,deco-x50-v1|\
+ tplink,eap650-outdoor-v1)
+ 	ubootenv_add_mtd "0:APPSBLENV" "0x0" "0x40000" "0x20000"
+ 	;;
+diff --git a/package/firmware/ipq-wifi/Makefile b/package/firmware/ipq-wifi/Makefile
+index 7adabc4..fbda546 100644
+--- a/package/firmware/ipq-wifi/Makefile
++++ b/package/firmware/ipq-wifi/Makefile
+@@ -13,6 +13,11 @@ PKG_FLAGS:=nonshared
+ 
+ include $(INCLUDE_DIR)/package.mk
+ 
++define Build/Prepare
++	$(call Build/Prepare/Default)
++	$(if $(wildcard ./files/*),$(CP) ./files/* $(PKG_BUILD_DIR)/)
++endef
++
+ define Build/Compile
+ endef
+ 
+@@ -93,6 +98,7 @@ ALLWIFIBOARDS:= \
+ 	spectrum_sax1v1k \
+ 	tcl_linkhub-hh500v \
+ 	tplink_archer-ax55-v1 \
++	tplink_deco-x50-v1 \
+ 	tplink_archer-c59-v1 \
+ 	tplink_archer-c6-v2 \
+ 	tplink_archer-c60-v1 \
+@@ -301,6 +307,7 @@ $(eval $(call generate-ipq-wifi-package,skspruce_wia3300-20,SKSpruce WIA3300-20)
+ $(eval $(call generate-ipq-wifi-package,spectrum_sax1v1k,Spectrum SAX1V1K))
+ $(eval $(call generate-ipq-wifi-package,tcl_linkhub-hh500v,TCL LINKHUB HH500V))
+ $(eval $(call generate-ipq-wifi-package,tplink_archer-ax55-v1,TP-Link Archer AX55 v1))
++$(eval $(call generate-ipq-wifi-package,tplink_deco-x50-v1,TP-Link Deco X50 v1))
+ $(eval $(call generate-ipq-wifi-package,tplink_archer-c59-v1,TP-Link Archer C59 V1))
+ $(eval $(call generate-ipq-wifi-package,tplink_archer-c6-v2,TP-Link Archer C6 V2))
+ $(eval $(call generate-ipq-wifi-package,tplink_archer-c60-v1,TP-Link Archer C60 V1))
+diff --git a/target/linux/generic/files/drivers/net/phy/rtl8367.h b/target/linux/generic/files/drivers/net/phy/rtl8367.h
+index a329919..92549e7 100644
+--- a/target/linux/generic/files/drivers/net/phy/rtl8367.h
++++ b/target/linux/generic/files/drivers/net/phy/rtl8367.h
+@@ -42,6 +42,7 @@ enum rtl8367_extif_mode {
+ 	RTL8367B_EXTIF_MODE_RMII_MAC = 7,
+ 	RTL8367B_EXTIF_MODE_RMII_PHY,
+ 	RTL8367B_EXTIF_MODE_RGMII_33V,
++	RTL8367D_EXTIF_MODE_HSGMII = 18,
+ };
+ 
+ struct rtl8367_extif_config {
+diff --git a/target/linux/generic/files/drivers/net/phy/rtl8367b.c b/target/linux/generic/files/drivers/net/phy/rtl8367b.c
+index 526bfcd..af96688 100644
+--- a/target/linux/generic/files/drivers/net/phy/rtl8367b.c
++++ b/target/linux/generic/files/drivers/net/phy/rtl8367b.c
+@@ -17,6 +17,7 @@
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
+ #include <linux/delay.h>
++#include <linux/mii.h>
+ #include <linux/skbuff.h>
+ 
+ #include "rtl8367.h"
+@@ -300,6 +301,98 @@ struct rtl8367b_initval {
+ #define   RTL8367D_SDS1_MODE_MASK		0x1f
+ #define   RTL8367D_PORT_SDS_MODE_DISABLE		0x1f
+ 
++#define RTL8367D_REG_BYPASS_LINE_RATE		0x03f7
++#define RTL8367D_REG_FIBER_CFG_2		0x13e8
++#define   RTL8367D_SDS_RX_DISABLE_MASK		0x00c0
++#define RTL8367D_REG_SDS_MISC			0x1d11
++#define   RTL8367D_SDS_MODE_MASK		0x001f
++#define   RTL8367D_PORT_SDS_MODE_HSGMII		0x12
++#define   RTL8367D_MAC6_SEL_SDS0		BIT(9)
++#define   RTL8367D_PA12PC_EN_S0			BIT(10)
++#define   RTL8367D_PA33PC_EN_S0			BIT(11)
++#define RTL8367D_REG_SDS_INDACS_CMD		0x6600
++#define RTL8367D_REG_SDS_INDACS_ADR		0x6601
++#define RTL8367D_REG_SDS_INDACS_DATA		0x6602
++
++/*
++ * SerDes 0 patch and HSGMII (2.5G SGMII) parameters for the RTL8367S-VB,
++ * taken from the Realtek switch SDK (rtl8367d dal_rtl8367d_port.c).
++ */
++static const u16 rtl8367d_sds_nctrl_patch[][2] = {
++	{0x6100, 0x2800},
++	{0x6136, 0x0000}, {0x6135, 0x7000}, {0x6136, 0xc008}, {0x6135, 0x7001},
++	{0x6136, 0x405f}, {0x6135, 0x7002}, {0x6136, 0x1205}, {0x6135, 0x7003},
++	{0x6136, 0x2200}, {0x6135, 0x7004}, {0x6136, 0x4274}, {0x6135, 0x7005},
++	{0x6136, 0x4755}, {0x6135, 0x7006}, {0x6136, 0x2200}, {0x6135, 0x7007},
++	{0x6136, 0xc008}, {0x6135, 0x7008}, {0x6136, 0x6011}, {0x6135, 0x7009},
++	{0x6136, 0xac01}, {0x6135, 0x700a}, {0x6136, 0x0000}, {0x6135, 0x700b},
++	{0x6136, 0x8c01}, {0x6135, 0x700c}, {0x6136, 0x0000}, {0x6135, 0x700d},
++	{0x6136, 0x0800}, {0x6135, 0x700e}, {0x6136, 0xd301}, {0x6135, 0x700f},
++	{0x6136, 0xd4ff}, {0x6135, 0x7010}, {0x6136, 0xc007}, {0x6135, 0x7011},
++	{0x6136, 0x6000}, {0x6135, 0x7012}, {0x6136, 0x4000}, {0x6135, 0x7013},
++	{0x6136, 0x6000}, {0x6135, 0x7014}, {0x6136, 0x4000}, {0x6135, 0x7015},
++	{0x6136, 0xc008}, {0x6135, 0x7016}, {0x6136, 0x0800}, {0x6135, 0x7017},
++	{0x6136, 0xc008}, {0x6135, 0x7018}, {0x6136, 0x64f4}, {0x6135, 0x7019},
++	{0x6136, 0x120f}, {0x6135, 0x701a}, {0x6136, 0x64b4}, {0x6135, 0x701b},
++	{0x6136, 0xd000}, {0x6135, 0x701c}, {0x6136, 0xcf02}, {0x6135, 0x701d},
++	{0x6136, 0xce93}, {0x6135, 0x701e}, {0x6136, 0xcd4a}, {0x6135, 0x701f},
++	{0x6136, 0x1208}, {0x6135, 0x7020}, {0x6136, 0xd000}, {0x6135, 0x7021},
++	{0x6136, 0xcf20}, {0x6135, 0x7022}, {0x6136, 0xcee6}, {0x6135, 0x7023},
++	{0x6136, 0xcd02}, {0x6135, 0x7024}, {0x6136, 0x1208}, {0x6135, 0x7025},
++	{0x6136, 0xd000}, {0x6135, 0x7026}, {0x6136, 0xcf3f}, {0x6135, 0x7027},
++	{0x6136, 0xcd01}, {0x6135, 0x7028}, {0x6136, 0x1208}, {0x6135, 0x7029},
++	{0x6136, 0xd000}, {0x6135, 0x702a}, {0x6136, 0xcfcd}, {0x6135, 0x702b},
++	{0x6136, 0xcd00}, {0x6135, 0x702c}, {0x6136, 0x1208}, {0x6135, 0x702d},
++	{0x6136, 0xd000}, {0x6135, 0x702e}, {0x6136, 0xcf04}, {0x6135, 0x702f},
++	{0x6136, 0xcd02}, {0x6135, 0x7030}, {0x6136, 0x1208}, {0x6135, 0x7031},
++	{0x6136, 0xd004}, {0x6135, 0x7032}, {0x6136, 0xcf00}, {0x6135, 0x7033},
++	{0x6136, 0xcd01}, {0x6135, 0x7034}, {0x6136, 0x1208}, {0x6135, 0x7035},
++	{0x6136, 0xd000}, {0x6135, 0x7036}, {0x6136, 0xcfcd}, {0x6135, 0x7037},
++	{0x6136, 0xcd00}, {0x6135, 0x7038}, {0x6136, 0x1208}, {0x6135, 0x7039},
++	{0x6136, 0xcf00}, {0x6135, 0x703a}, {0x6136, 0xcd02}, {0x6135, 0x703b},
++	{0x6136, 0x1208}, {0x6135, 0x703c}, {0x6136, 0xcfcd}, {0x6135, 0x703d},
++	{0x6136, 0xcd00}, {0x6135, 0x703e}, {0x6136, 0x1208}, {0x6135, 0x703f},
++	{0x6136, 0xc008}, {0x6135, 0x7040}, {0x6136, 0x64f5}, {0x6135, 0x7041},
++	{0x6136, 0x120f}, {0x6135, 0x7042}, {0x6136, 0x64b5}, {0x6135, 0x7043},
++	{0x6136, 0xd000}, {0x6135, 0x7044}, {0x6136, 0xcf04}, {0x6135, 0x7045},
++	{0x6136, 0xce93}, {0x6135, 0x7046}, {0x6136, 0xcd4a}, {0x6135, 0x7047},
++	{0x6136, 0x1208}, {0x6135, 0x7048}, {0x6136, 0xd000}, {0x6135, 0x7049},
++	{0x6136, 0xcf20}, {0x6135, 0x704a}, {0x6136, 0xcee6}, {0x6135, 0x704b},
++	{0x6136, 0xcd02}, {0x6135, 0x704c}, {0x6136, 0x1208}, {0x6135, 0x704d},
++	{0x6136, 0xd000}, {0x6135, 0x704e}, {0x6136, 0xcf3f}, {0x6135, 0x704f},
++	{0x6136, 0xcd01}, {0x6135, 0x7050}, {0x6136, 0x1208}, {0x6135, 0x7051},
++	{0x6136, 0xd000}, {0x6135, 0x7052}, {0x6136, 0xcfcf}, {0x6135, 0x7053},
++	{0x6136, 0xcd00}, {0x6135, 0x7054}, {0x6136, 0x1208}, {0x6135, 0x7055},
++	{0x6136, 0xd000}, {0x6135, 0x7056}, {0x6136, 0xcf04}, {0x6135, 0x7057},
++	{0x6136, 0xcd02}, {0x6135, 0x7058}, {0x6136, 0x1208}, {0x6135, 0x7059},
++	{0x6136, 0xd004}, {0x6135, 0x705a}, {0x6136, 0xcf00}, {0x6135, 0x705b},
++	{0x6136, 0xcd01}, {0x6135, 0x705c}, {0x6136, 0x1208}, {0x6135, 0x705d},
++	{0x6136, 0xd000}, {0x6135, 0x705e}, {0x6136, 0xcfcf}, {0x6135, 0x705f},
++	{0x6136, 0xcd00}, {0x6135, 0x7060}, {0x6136, 0x1208}, {0x6135, 0x7061},
++	{0x6136, 0xcf00}, {0x6135, 0x7062}, {0x6136, 0xcd02}, {0x6135, 0x7063},
++	{0x6136, 0x1208}, {0x6135, 0x7064}, {0x6136, 0xcfcf}, {0x6135, 0x7065},
++	{0x6136, 0xcd00}, {0x6135, 0x7066}, {0x6136, 0x1208}, {0x6135, 0x7067},
++	{0x6136, 0xd000}, {0x6135, 0x7068}, {0x6136, 0xcf00}, {0x6135, 0x7069},
++	{0x6136, 0xce93}, {0x6135, 0x706a}, {0x6136, 0xcd4a}, {0x6135, 0x706b},
++	{0x6136, 0x1208}, {0x6135, 0x706c}, {0x6136, 0xd000}, {0x6135, 0x706d},
++	{0x6136, 0xcf00}, {0x6135, 0x706e}, {0x6136, 0xcee6}, {0x6135, 0x706f},
++	{0x6136, 0xcd02}, {0x6135, 0x7070}, {0x6136, 0x1208}, {0x6135, 0x7071},
++	{0x6136, 0xd000}, {0x6135, 0x7072}, {0x6136, 0xcf3f}, {0x6135, 0x7073},
++	{0x6136, 0xcd01}, {0x6135, 0x7074}, {0x6136, 0x1208}, {0x6135, 0x7075},
++	{0x6136, 0xd000}, {0x6135, 0x7076}, {0x6136, 0xcfcd}, {0x6135, 0x7077},
++	{0x6136, 0xcd00}, {0x6135, 0x7078}, {0x6136, 0x1208}, {0x6135, 0x7079},
++	{0x6136, 0xcfcf}, {0x6135, 0x707a}, {0x6136, 0x1208}, {0x6135, 0x707b},
++	{0x6136, 0x2200}, {0x6135, 0x707c},
++	{0x6102, 0x0000}, {0x6101, 0x0420}, {0x6100, 0x0000}, {0x6102, 0x0000},
++	{0x6104, 0x0200}, {0x6103, 0x0400}, {0x6101, 0x0000},
++};
++
++static const u16 rtl8367d_hsgmii_cfg[][2] = {
++	{0x0427, 0x4e0c}, {0x0428, 0xaa00}, {0x0425, 0x5189},
++	{0x0424, 0x8414}, {0x0423, 0x1020}, {0x0410, 0x0002},
++	{0x0504, 0x051b}, {0x0421, 0x8e13}, {0x0422, 0x1140},
++};
++
+ static struct rtl8366_mib_counter
+ rtl8367b_mib_counters[RTL8367B_NUM_MIB_COUNTERS] = {
+ 	{0,   0, 4, "ifInOctets"			},
+@@ -577,6 +670,34 @@ static int rtl8367b_init_regs(struct rtl8366_smi *smi)
+ 		return -ENODEV;
+ 	}
+ 
++	/*
++	 * The Realtek SDK does not load any init table on the RTL8367S-VB;
++	 * the RTL8367C one also reprograms the port mode registers, which
++	 * breaks its SerDes (HSGMII) interface.
++	 */
++	if (of_property_read_bool(smi->parent->of_node, "realtek,skip-initvals")) {
++		u32 data;
++		int err;
++		int i;
++
++		REG_WR(smi, 0x13c2, 0x0000);
++
++		/* GPHY OCP address prefix for the standard PHY registers */
++		REG_RMW(smi, 0x1d15, 0x0fc0, 0x29 << 6);
++
++		/* power up the five UTP PHYs and restart autonegotiation */
++		for (i = 0; i < 5; i++) {
++			err = rtl8367b_read_phy_reg(smi, i, MII_BMCR, &data);
++			if (err)
++				return err;
++			data = (data & ~BMCR_PDOWN) | BMCR_ANRESTART;
++			err = rtl8367b_write_phy_reg(smi, i, MII_BMCR, data);
++			if (err)
++				return err;
++		}
++		return 0;
++	}
++
+ 	return rtl8367b_write_initvals(smi, initvals, count);
+ }
+ 
+@@ -645,12 +766,67 @@ static int rtl8367b_reset_chip(struct rtl8366_smi *smi)
+ 	return 0;
+ }
+ 
++/* RTL8367S-VB: route SerDes 0 to MAC6 (extif0) and run it as HSGMII */
++static int rtl8367d_extif_set_hsgmii(struct rtl8366_smi *smi)
++{
++	int err;
++	u32 data;
++	int i;
++
++	REG_RMW(smi, RTL8367D_REG_BYPASS_LINE_RATE, BIT(1), 0);
++	REG_RMW(smi, RTL8367D_REG_SDS_MISC, RTL8367D_MAC6_SEL_SDS0,
++		RTL8367D_MAC6_SEL_SDS0);
++
++	for (i = 0; i < ARRAY_SIZE(rtl8367d_sds_nctrl_patch); i++)
++		REG_WR(smi, rtl8367d_sds_nctrl_patch[i][0],
++		       rtl8367d_sds_nctrl_patch[i][1]);
++
++	for (i = 0; i < ARRAY_SIZE(rtl8367d_hsgmii_cfg); i++) {
++		REG_WR(smi, RTL8367D_REG_SDS_INDACS_DATA, rtl8367d_hsgmii_cfg[i][1]);
++		REG_WR(smi, RTL8367D_REG_SDS_INDACS_ADR, rtl8367d_hsgmii_cfg[i][0]);
++		REG_WR(smi, RTL8367D_REG_SDS_INDACS_CMD, 0x00cd);
++	}
++
++	REG_RMW(smi, RTL8367D_REG_FIBER_CFG_2, RTL8367D_SDS_RX_DISABLE_MASK, 0x0040);
++	REG_RMW(smi, RTL8367D_REG_SDS_MISC,
++		RTL8367D_PA12PC_EN_S0 | RTL8367D_PA33PC_EN_S0,
++		RTL8367D_PA12PC_EN_S0 | RTL8367D_PA33PC_EN_S0);
++	REG_RMW(smi, RTL8367D_REG_SDS_MISC, RTL8367D_SDS_MODE_MASK,
++		RTL8367D_PORT_SDS_MODE_HSGMII);
++
++	/*
++	 * The link is forced on both sides, so turn off in-band
++	 * autonegotiation in SerDes 0 register 2 (0x612f must be clear
++	 * while doing so).
++	 */
++	REG_WR(smi, RTL8367D_REG_SDS_INDACS_ADR, 0x0002);
++	REG_WR(smi, RTL8367D_REG_SDS_INDACS_CMD, 0x008d);
++	REG_RD(smi, RTL8367D_REG_SDS_INDACS_DATA, &data);
++	data = (data & ~0x0200) | 0x0100;
++	REG_WR(smi, RTL8367D_REG_SDS_INDACS_DATA, data);
++	REG_WR(smi, RTL8367D_REG_SDS_INDACS_ADR, 0x0002);
++	REG_WR(smi, RTL8367D_REG_SDS_INDACS_CMD, 0x00cd);
++
++	REG_WR(smi, 0x612f, 0x000c);
++
++	return 0;
++}
++
+ static int rtl8367b_extif_set_mode(struct rtl8366_smi *smi, int id,
+ 				   enum rtl8367_extif_mode mode)
+ {
+ 	int err;
+ 	u32 data;
+ 
++	if (mode == RTL8367D_EXTIF_MODE_HSGMII) {
++		if (smi->rtl8367b_chip != RTL8367B_CHIP_RTL8367S_VB || id != 0) {
++			dev_err(smi->parent,
++				"HSGMII is only supported on RTL8367S-VB extif0\n");
++			return -EINVAL;
++		}
++		return rtl8367d_extif_set_hsgmii(smi);
++	}
++
+ 	/* set port mode */
+ 	switch (mode) {
+ 	case RTL8367_EXTIF_MODE_RGMII:
+@@ -801,6 +977,9 @@ static int rtl8367b_extif_init(struct rtl8366_smi *smi, int id,
+ 		if (err)
+ 			return err;
+ 
++		if (mode == RTL8367D_EXTIF_MODE_HSGMII)
++			return 0;
++
+ 		err = rtl8367b_extif_set_rgmii_delay(smi, id, cfg->txdelay,
+ 						     cfg->rxdelay);
+ 		if (err)
+diff --git a/target/linux/qualcommax/dts/ipq5018-deco-x50-v1.dts b/target/linux/qualcommax/dts/ipq5018-deco-x50-v1.dts
+new file mode 100644
+index 0000000..ae01f8f
+--- /dev/null
++++ b/target/linux/qualcommax/dts/ipq5018-deco-x50-v1.dts
+@@ -0,0 +1,371 @@
++// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
++
++/dts-v1/;
++
++#include "ipq5018.dtsi"
++#include "ipq5018-ess.dtsi"
++#include "ipq5018-qcn6122.dtsi"
++
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/input/input.h>
++#include <dt-bindings/leds/common.h>
++
++/*
++ * Hardware description is taken from the TP-Link GPL release that the
++ * Deco X50 v1 support page links to (GPL_X55.tar.gz), board file
++ * qcom-ipq5018-mp03.3.dts (IPQ5018 + QCN6102 5 GHz + RTL8367S), and from
++ * the boot log / flash dump in this repository's README.
++ *
++ * Items marked UNVERIFIED have not been confirmed on real hardware yet.
++ */
++
++/ {
++	model = "TP-Link Deco X50 v1";
++	compatible = "tplink,deco-x50-v1", "qcom,ipq5018";
++
++	aliases {
++		serial0 = &blsp1_uart1;
++		led-boot = &led_status_green;
++		led-failsafe = &led_status_red;
++		led-running = &led_status_green;
++		led-upgrade = &led_status_blue;
++	};
++
++	chosen {
++		stdout-path = "serial0:115200n8";
++		bootargs-append = " root=/dev/ubiblock0_1 coherent_pool=2M";
++	};
++
++	keys {
++		compatible = "gpio-keys";
++		pinctrl-0 = <&button_pins>;
++		pinctrl-names = "default";
++
++		button-reset {
++			label = "reset";
++			gpios = <&tlmm 33 GPIO_ACTIVE_LOW>;
++			linux,code = <KEY_RESTART>;
++		};
++	};
++
++	/* single RGB status LED on top of the unit */
++	leds {
++		compatible = "gpio-leds";
++		pinctrl-0 = <&led_pins>;
++		pinctrl-names = "default";
++
++		led_status_red: led-0 {
++			color = <LED_COLOR_ID_RED>;
++			function = LED_FUNCTION_STATUS;
++			gpios = <&tlmm 23 GPIO_ACTIVE_HIGH>;
++		};
++
++		led_status_green: led-1 {
++			color = <LED_COLOR_ID_GREEN>;
++			function = LED_FUNCTION_STATUS;
++			gpios = <&tlmm 24 GPIO_ACTIVE_HIGH>;
++		};
++
++		led_status_blue: led-2 {
++			color = <LED_COLOR_ID_BLUE>;
++			function = LED_FUNCTION_STATUS;
++			gpios = <&tlmm 29 GPIO_ACTIVE_HIGH>;
++		};
++	};
++
++	/*
++	 * realtek,extif: cpu port 6 (extif0), no RGMII delays, HSGMII,
++	 * forced 2.5G full duplex link with pause frames.
++	 */
++	switch {
++		compatible = "realtek,rtl8367b";
++		realtek,extif = <6 0 0 18 1 1 1 1 1 5>;
++		realtek,skip-initvals;
++		mii-bus = <&mdio1>;
++		phy-id = <29>;
++	};
++};
++
++&sleep_clk {
++	clock-frequency = <32000>;
++};
++
++&xo_board_clk {
++	clock-div = <4>;
++	clock-mult = <1>;
++};
++
++&blsp1_uart1 {
++	pinctrl-0 = <&serial_0_pins>;
++	pinctrl-names = "default";
++	status = "okay";
++};
++
++&prng {
++	status = "okay";
++};
++
++&qfprom {
++	status = "okay";
++};
++
++&qpic_bam {
++	status = "okay";
++};
++
++/* ESMT F50D1G41LB, 128 MiB SPI-NAND; layout from the stock boot log */
++&qpic_nand {
++	pinctrl-0 = <&qpic_pins>;
++	pinctrl-names = "default";
++	status = "okay";
++
++	nand@0 {
++		compatible = "spi-nand";
++		reg = <0>;
++
++		nand-ecc-engine = <&qpic_nand>;
++		nand-ecc-strength = <4>;
++		nand-ecc-step-size = <512>;
++		nand-bus-width = <8>;
++
++		partitions {
++			compatible = "fixed-partitions";
++			#address-cells = <1>;
++			#size-cells = <1>;
++
++			partition@0 {
++				label = "0:SBL1";
++				reg = <0x0 0x80000>;
++				read-only;
++			};
++
++			partition@80000 {
++				label = "0:MIBIB";
++				reg = <0x80000 0x80000>;
++				read-only;
++			};
++
++			partition@100000 {
++				label = "0:BOOTCONFIG";
++				reg = <0x100000 0x40000>;
++				read-only;
++			};
++
++			partition@140000 {
++				label = "0:BOOTCONFIG1";
++				reg = <0x140000 0x40000>;
++				read-only;
++			};
++
++			partition@180000 {
++				label = "0:QSEE";
++				reg = <0x180000 0x100000>;
++				read-only;
++			};
++
++			partition@280000 {
++				label = "0:DEVCFG";
++				reg = <0x280000 0x40000>;
++				read-only;
++			};
++
++			partition@2c0000 {
++				label = "0:CDT";
++				reg = <0x2c0000 0x40000>;
++				read-only;
++			};
++
++			partition@300000 {
++				label = "0:APPSBLENV";
++				reg = <0x300000 0x80000>;
++			};
++
++			partition@380000 {
++				label = "0:APPSBL";
++				reg = <0x380000 0x140000>;
++				read-only;
++			};
++
++			partition@4c0000 {
++				label = "0:ART";
++				reg = <0x4c0000 0x100000>;
++				read-only;
++			};
++
++			partition@5c0000 {
++				label = "0:TRAINING";
++				reg = <0x5c0000 0x80000>;
++				read-only;
++			};
++
++			partition@640000 {
++				label = "rootfs";
++				reg = <0x640000 0x2a00000>;
++			};
++
++			partition@3040000 {
++				label = "rootfs_1";
++				reg = <0x3040000 0x2a00000>;
++			};
++
++			partition@5a40000 {
++				label = "0:ETHPHYFW";
++				reg = <0x5a40000 0x80000>;
++				read-only;
++			};
++
++			partition@5ac0000 {
++				label = "factory_data";
++				reg = <0x5ac0000 0x900000>;
++				read-only;
++			};
++
++			partition@63c0000 {
++				label = "runtime_data";
++				reg = <0x63c0000 0x1100000>;
++				read-only;
++			};
++		};
++	};
++};
++
++/*
++ * ===========================================================================
++ * Ethernet:
++ *
++ *   gmac1 -> uniphy0 -> 2.5G HSGMII (forced) -> RTL8367S-VB port 6 (extif0)
++ *   All three RJ45 jacks are RTL8367S-VB UTP ports: top = port 2,
++ *   middle = port 1, bottom = port 0 (used as WAN). The IPQ5018 internal
++ *   GE PHY (gmac0) is not wired to a jack, so gmac0 stays disabled.
++ *
++ * The switch is an RTL8367S-VB (chip id 0x6642, Realtek "family D") at
++ * mdio1 address 29, driven by the swconfig rtl8367b driver. Its reset line
++ * is GPIO39, which the stock U-Boot already releases.
++ * ===========================================================================
++ */
++
++/*
++ * mdio0 must stay enabled even though the GE PHY behind it is unused:
++ * registering the GE PHY deasserts GCC_GEPHY_MISC_ARES, which also gates
++ * the MDC/MDIO path shared with mdio1 (see the Archer AX55 v1).
++ */
++&mdio0 {
++	status = "okay";
++};
++
++&uniphy0 {
++	status = "okay";
++
++	assigned-clocks = <&uniphy0 UNIPHY_CLK_REF>;
++	assigned-clock-rates = <UNIPHY_REFCLK_50MHZ>;
++};
++
++&gmac1 {
++	status = "okay";
++
++	phy-mode = "2500base-x";
++
++	fixed-link {
++		speed = <2500>;
++		full-duplex;
++	};
++};
++
++&mdio1 {
++	status = "okay";
++
++	pinctrl-0 = <&mdio1_pins>;
++	pinctrl-names = "default";
++};
++
++/*
++ * WiFi: IPQ5018 2.4 GHz + QCN6102 5 GHz (AX3000), same arrangement as the
++ * Archer AX55 v1 / GL-B3000. Pre-cal comes from 0:ART via the
++ * 11-ath11k-caldata hotplug (same offsets as the stock
++ * /lib/read_caldata_to_fs.sh). Board data comes from the stock
++ * bdwlan_<country>.b24 / .b60 files, see openwrt/make-board2.py.
++ */
++&q6v5_wcss {
++	status = "okay";
++};
++
++&wifi {
++	status = "okay";
++
++	qcom,rproc = <&q6_wcss_pd1>;
++	qcom,ath11k-fw-memory-mode = <1>;
++	qcom,ath11k-calibration-variant = "TP-Link-Deco-X50-v1";
++	qcom,bdf-addr = <0x4c400000>;
++};
++
++&wifi1 {
++	status = "okay";
++
++	qcom,rproc = <&q6_wcss_pd3>;
++	qcom,userpd-subsys-name = "q6v5_wcss_userpd3";
++	qcom,ath11k-fw-memory-mode = <1>;
++	qcom,ath11k-calibration-variant = "TP-Link-Deco-X50-v1";
++	qcom,bdf-addr = <0x4d100000>;
++	qcom,m3-dump-addr = <0x4df00000>;
++};
++
++&tlmm {
++	button_pins: button-state {
++		pins = "gpio33";
++		function = "gpio";
++		drive-strength = <8>;
++		bias-pull-up;
++	};
++
++	led_pins: led-state {
++		pins = "gpio23", "gpio24", "gpio29";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	mdio1_pins: mdio1-state {
++		mdc-pins {
++			pins = "gpio36";
++			function = "mdc";
++			drive-strength = <8>;
++			bias-pull-up;
++		};
++
++		mdio-pins {
++			pins = "gpio37";
++			function = "mdio";
++			drive-strength = <8>;
++			bias-pull-up;
++		};
++	};
++
++	qpic_pins: qpic-state {
++		clock-pins {
++			pins = "gpio9";
++			function = "qspi_clk";
++			drive-strength = <8>;
++			bias-disable;
++		};
++
++		cs-pins {
++			pins = "gpio8";
++			function = "qspi_cs";
++			drive-strength = <8>;
++			bias-disable;
++		};
++
++		data-pins {
++			pins = "gpio4", "gpio5", "gpio6", "gpio7";
++			function = "qspi_data";
++			drive-strength = <8>;
++			bias-disable;
++		};
++	};
++
++	serial_0_pins: uart0-state {
++		pins = "gpio20", "gpio21";
++		function = "blsp0_uart0";
++		bias-disable;
++	};
++};
+diff --git a/target/linux/qualcommax/image/ipq50xx.mk b/target/linux/qualcommax/image/ipq50xx.mk
+index ac20725..4cdd383 100644
+--- a/target/linux/qualcommax/image/ipq50xx.mk
++++ b/target/linux/qualcommax/image/ipq50xx.mk
+@@ -316,6 +316,29 @@ endif
+ endef
+ TARGET_DEVICES += tplink_archer-ax55-v1
+ 
++define Device/tplink_deco-x50-v1
++	$(call Device/FitImageLzma)
++	$(call Device/UbiFit)
++	DEVICE_VENDOR := TP-Link
++	DEVICE_MODEL := Deco X50
++	DEVICE_VARIANT := v1
++	DEVICE_DTS_CONFIG := config@mp03.3
++	SOC := ipq5018
++	BLOCKSIZE := 128k
++	PAGESIZE := 2048
++	IMAGE_SIZE := 43008k
++	NAND_SIZE := 128m
++	DEVICE_PACKAGES := ath11k-firmware-ipq5018-qcn6122 \
++		ipq-wifi-tplink_deco-x50-v1 kmod-switch-rtl8367b swconfig
++ifneq ($(CONFIG_TARGET_ROOTFS_INITRAMFS),)
++ifeq ($(IB),)
++	ARTIFACTS := initramfs-factory.ubi
++	ARTIFACT/initramfs-factory.ubi := append-image-stage initramfs-uImage.itb | ubinize-kernel
++endif
++endif
++endef
++TARGET_DEVICES += tplink_deco-x50-v1
++
+ define Device/tplink_eap650-outdoor-v1
+ 	$(call Device/FitImage)
+ 	$(call Device/UbiFit)
+diff --git a/target/linux/qualcommax/ipq50xx/base-files/etc/board.d/02_network b/target/linux/qualcommax/ipq50xx/base-files/etc/board.d/02_network
+index d4cc586..1680df2 100644
+--- a/target/linux/qualcommax/ipq50xx/base-files/etc/board.d/02_network
++++ b/target/linux/qualcommax/ipq50xx/base-files/etc/board.d/02_network
+@@ -45,6 +45,11 @@ ipq50xx_setup_interfaces()
+ 		ucidef_set_network_device_conduit "lan3" "eth1"
+ 		ucidef_set_network_device_conduit "wan" "eth0"
+ 		;;
++	tplink,deco-x50-v1)
++		# jacks top to bottom: switch port 2, 1, 0
++		ucidef_add_switch "switch0" \
++			"2:lan" "1:lan" "0:wan" "6t@eth0"
++		;;
+ 	tplink,eap650-outdoor-v1|\
+ 	tplink,re700x)
+ 		ucidef_set_interface_lan "lan" "dhcp"
+@@ -71,6 +76,13 @@ ipq50xx_setup_macs()
+ 		# DSA conduit's address on every boot - pin it to the label MAC
+ 		ucidef_set_network_device_mac "eth0" "$label_mac"
+ 		;;
++	tplink,deco-x50-v1)
++		label_mac=$(get_mac_binary /tmp/factory_data/default-mac 0)
++		[ -n "$label_mac" ] || return
++		ucidef_set_interface_macaddr "lan" "$label_mac"
++		ucidef_set_interface_macaddr "wan" "$(macaddr_add "$label_mac" 1)"
++		ucidef_set_label_macaddr "$label_mac"
++		;;
+ 	tplink,eap650-outdoor-v1|\
+ 	tplink,re700x)
+ 		label_mac=$(get_mac_binary /tmp/factory_data/default-mac 0)
+diff --git a/target/linux/qualcommax/ipq50xx/base-files/etc/hotplug.d/firmware/11-ath11k-caldata b/target/linux/qualcommax/ipq50xx/base-files/etc/hotplug.d/firmware/11-ath11k-caldata
+index 5658048..60e7097 100644
+--- a/target/linux/qualcommax/ipq50xx/base-files/etc/hotplug.d/firmware/11-ath11k-caldata
++++ b/target/linux/qualcommax/ipq50xx/base-files/etc/hotplug.d/firmware/11-ath11k-caldata
+@@ -59,6 +59,13 @@ case "$FIRMWARE" in
+ 		[ -n "$label_mac" ] && ath11k_patch_mac "$(macaddr_add "$label_mac" -1)" 0
+ 		ath11k_set_macflag
+ 		;;
++	tplink,deco-x50-v1)
++		caldata_extract "0:ART" 0x1000 0x20000
++		label_mac=$(get_mac_binary /tmp/factory_data/default-mac 0)
++		[ -n "$label_mac" ] && ath11k_patch_mac "$(macaddr_add "$label_mac" 2)" 0
++		ath11k_set_macflag
++		ath11k_remove_regdomain
++		;;
+ 	tplink,archer-ax55-v1)
+ 		caldata_extract "0:ART" 0x1000 0x20000
+ 		label_mac=$(get_mac_binary "/tmp/tp_data/default-mac" 0)
+@@ -140,6 +147,13 @@ case "$FIRMWARE" in
+ 		[ -n "$label_mac" ] && ath11k_patch_mac "$(macaddr_add "$label_mac" -2)" 0
+ 		ath11k_set_macflag
+ 		;;
++	tplink,deco-x50-v1)
++		caldata_extract "0:ART" 0x26800 0x20000
++		label_mac=$(get_mac_binary /tmp/factory_data/default-mac 0)
++		[ -n "$label_mac" ] && ath11k_patch_mac "$(macaddr_add "$label_mac" 3)" 0
++		ath11k_set_macflag
++		ath11k_remove_regdomain
++		;;
+ 	tplink,archer-ax55-v1)
+ 		caldata_extract "0:ART" 0x26800 0x20000
+ 		label_mac=$(get_mac_binary "/tmp/tp_data/default-mac" 0)
+diff --git a/target/linux/qualcommax/ipq50xx/base-files/lib/preinit/09_mount_factory_data b/target/linux/qualcommax/ipq50xx/base-files/lib/preinit/09_mount_factory_data
+index 1a8d0be..e7ba64e 100644
+--- a/target/linux/qualcommax/ipq50xx/base-files/lib/preinit/09_mount_factory_data
++++ b/target/linux/qualcommax/ipq50xx/base-files/lib/preinit/09_mount_factory_data
+@@ -7,6 +7,7 @@ preinit_mount_factory_data() {
+ 	. /lib/functions/system.sh
+ 
+ 	case $(board_name) in
++	tplink,deco-x50-v1|\
+ 	tplink,eap650-outdoor-v1|\
+ 	tplink,re700x)
+ 		mtd_path=$(find_mtd_chardev "factory_data")
+diff --git a/target/linux/qualcommax/ipq50xx/base-files/lib/upgrade/platform.sh b/target/linux/qualcommax/ipq50xx/base-files/lib/upgrade/platform.sh
+index e78eb55..4e7995e 100644
+--- a/target/linux/qualcommax/ipq50xx/base-files/lib/upgrade/platform.sh
++++ b/target/linux/qualcommax/ipq50xx/base-files/lib/upgrade/platform.sh
+@@ -269,6 +269,7 @@ platform_do_upgrade() {
+ 		nand_do_upgrade_success
+ 		;;
+ 	tplink,archer-ax55-v1|\
++	tplink,deco-x50-v1|\
+ 	tplink,eap650-outdoor-v1|\
+ 	tplink,re700x)
+ 		# Dual boot: install into the inactive rootfs/rootfs_1 slot,

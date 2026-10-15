@@ -1,6 +1,10 @@
 # Deco X50 Firmware Unpack
 ## About
 TODO
+
+## OpenWrt
+
+[`openwrt/`](openwrt/README.md) contains an OpenWrt port for the Deco X50 v1. It has been installed and runs from flash, with Ethernet (WAN/LAN), Wi-Fi and LuCI working. The directory holds the patch, a Docker build and installation steps. [`pico-uart-bridge/`](pico-uart-bridge/) is a PIO-based USB-UART bridge for an RP2040 (GP5 TX, GP6 RX) that was used for the 1.8 V console.
 ## Hardware Specifications
 
 |  |  |
