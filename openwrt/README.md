@@ -94,7 +94,13 @@ A power cycle returns the unit to the stock firmware.
    ssh root@192.168.1.1 'sysupgrade -n /tmp/sysupgrade.bin'
    ```
 
-When run from RAM, the image goes to `rootfs_1` and `tp_boot_idx` is set to 1. `rootfs` (slot 0) keeps the stock firmware. Later `sysupgrade` runs from the flashed system always write the slot that is not running, then switch `tp_boot_idx` to it.
+When run from RAM, the image goes to `rootfs_1` and `tp_boot_idx` is set to 1. `rootfs` (slot 0) keeps the stock firmware.
+
+## Updating (no UART needed)
+
+Once OpenWrt runs from flash, update it like any OpenWrt device: use LuCI's *Flash new firmware image* or `sysupgrade` with the `-squashfs-sysupgrade.bin`. Settings are kept unless you use `-n`. The update is written to the slot that is not running, and `tp_boot_idx` then points to it, so the previous image stays behind as a fallback. **The first update from flash therefore overwrites the stock firmware in slot 0.** After that, the slots alternate between the current and the previous OpenWrt.
+
+If the device boots but cannot be reached, for example after a bad configuration, press the reset button repeatedly while the LED blinks fast during boot. That enters OpenWrt failsafe mode at `192.168.1.1` with SSH. Both paths have been tested on the device.
 
 How the stock U-Boot boots (`cmd_bootqca.c` / `ipq5018.c` in the GPL):
 
@@ -109,5 +115,5 @@ How the stock U-Boot boots (`cmd_bootqca.c` / `ipq5018.c` in the GPL):
 
 ## Not done yet
 
-- The reset button and LED triggers are defined but not tested.
-- Installing without UART. The stock web UI only accepts TP-Link-signed firmware.
+- LED triggers beyond the status LED.
+- Installing from stock without UART. The stock web UI only accepts TP-Link-signed firmware.
