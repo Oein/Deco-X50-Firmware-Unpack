@@ -80,6 +80,9 @@ exit 0
 WIFI
 		chmod 755 files/etc/board.d/99_wifi_defaults
 
+		# build with the default feeds only
+		rm -f feeds.conf
+
 		./scripts/feeds update -a
 		./scripts/feeds install -a
 

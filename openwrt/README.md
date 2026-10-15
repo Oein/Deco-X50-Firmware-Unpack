@@ -34,6 +34,9 @@ Neither `rtl8365mb` (DSA) nor the stock `rtl8367b` (swconfig) driver can bring u
 
 - A new extif mode `18` (`RTL8367D_EXTIF_MODE_HSGMII`) runs the SerDes 0 patch and HSGMII sequence from the Realtek SDK in the GPL release, then disables in-band autonegotiation.
 - A new DT flag `realtek,skip-initvals` skips the RTL8367C init table. That table breaks the SerDes on this chip. The driver then only sets the GPHY OCP prefix and powers up the UTP PHYs, like the Realtek SDK does.
+- A new `arl_table` switch attribute (`swconfig dev switch0 get arl_table`) lists the learned unicast MACs per port, in the same format as `ar8xxx`.
+
+The switch conduit `eth0` (gmac1) has no MAC source of its own, so board.d pins it to the label MAC. Otherwise it would get a random address on every boot.
 
 ## Build
 

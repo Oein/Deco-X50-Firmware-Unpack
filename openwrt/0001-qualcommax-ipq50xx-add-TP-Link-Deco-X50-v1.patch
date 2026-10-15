@@ -55,7 +55,7 @@ index a329919..92549e7 100644
  
  struct rtl8367_extif_config {
 diff --git a/target/linux/generic/files/drivers/net/phy/rtl8367b.c b/target/linux/generic/files/drivers/net/phy/rtl8367b.c
-index 526bfcd..af96688 100644
+index 526bfcd..4c53078 100644
 --- a/target/linux/generic/files/drivers/net/phy/rtl8367b.c
 +++ b/target/linux/generic/files/drivers/net/phy/rtl8367b.c
 @@ -17,6 +17,7 @@
@@ -278,6 +278,120 @@ index 526bfcd..af96688 100644
  		err = rtl8367b_extif_set_rgmii_delay(smi, id, cfg->txdelay,
  						     cfg->rxdelay);
  		if (err)
+@@ -1363,6 +1542,100 @@ static int rtl8367b_sw_get_port_stats(struct switch_dev *dev, int port,
+ 				RTL8367B_MIB_TXB_ID, RTL8367B_MIB_RXB_ID));
+ }
+ 
++/*
++ * L2 lookup table (ARL) of the RTL8367S-VB, read with the "next learned
++ * unicast entry" method of the table access engine. Layout and registers
++ * from the Realtek SDK (rtl8367d dal_rtl8367d_l2.c).
++ */
++#define RTL8367D_TABLE_ACCESS_CTRL		0x0500
++#define RTL8367D_TABLE_ACCESS_ADDR		0x0501
++#define RTL8367D_TABLE_LUT_ADDR			0x0502
++#define   RTL8367D_TABLE_LUT_ADDR_MASK		0x0fff
++#define   RTL8367D_TABLE_LUT_HIT		BIT(12)
++#define   RTL8367D_TABLE_LUT_BUSY		BIT(13)
++#define RTL8367D_TABLE_READ_DATA0		0x0520
++#define RTL8367D_LUT_ENTRY_WORDS		5
++#define RTL8367D_LUT_READ_NEXT_L2UC		(3 << 4)
++#define RTL8367D_LUT_TARGET_L2			4
++#define RTL8367D_LUT_MAX_ADDR			0x083f
++
++static char rtl8367d_arl_buf[8192];
++
++static int rtl8367d_lut_wait(struct rtl8366_smi *smi)
++{
++	int timeout = 10;
++	u32 data;
++	int err;
++
++	do {
++		REG_RD(smi, RTL8367D_TABLE_LUT_ADDR, &data);
++		if (!(data & RTL8367D_TABLE_LUT_BUSY))
++			return 0;
++		udelay(10);
++	} while (--timeout);
++
++	return -ETIMEDOUT;
++}
++
++static int rtl8367d_sw_get_arl_table(struct switch_dev *dev,
++				     const struct switch_attr *attr,
++				     struct switch_val *val)
++{
++	struct rtl8366_smi *smi = sw_to_rtl8366_smi(dev);
++	char *buf = rtl8367d_arl_buf;
++	int len, err, i;
++	u32 addr = 0, next, data;
++	u16 entry[RTL8367D_LUT_ENTRY_WORDS];
++
++	if (smi->rtl8367b_chip != RTL8367B_CHIP_RTL8367S_VB)
++		return -EOPNOTSUPP;
++
++	len = scnprintf(buf, sizeof(rtl8367d_arl_buf),
++			"address resolution table\n");
++
++	while (addr <= RTL8367D_LUT_MAX_ADDR) {
++		err = rtl8367d_lut_wait(smi);
++		if (err)
++			return err;
++
++		REG_WR(smi, RTL8367D_TABLE_ACCESS_ADDR, addr);
++		REG_WR(smi, RTL8367D_TABLE_ACCESS_CTRL,
++		       RTL8367D_LUT_READ_NEXT_L2UC | RTL8367D_LUT_TARGET_L2);
++
++		err = rtl8367d_lut_wait(smi);
++		if (err)
++			return err;
++
++		REG_RD(smi, RTL8367D_TABLE_LUT_ADDR, &data);
++		if (!(data & RTL8367D_TABLE_LUT_HIT))
++			break;
++
++		/* the search wraps around once it passes the last entry */
++		next = data & RTL8367D_TABLE_LUT_ADDR_MASK;
++		if (next < addr)
++			break;
++
++		for (i = 0; i < RTL8367D_LUT_ENTRY_WORDS; i++) {
++			REG_RD(smi, RTL8367D_TABLE_READ_DATA0 + i, &data);
++			entry[i] = data;
++		}
++
++		len += scnprintf(buf + len, sizeof(rtl8367d_arl_buf) - len,
++				 "Port %d: MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
++				 ((entry[4] & 0x0001) << 2) | ((entry[3] & 0xc000) >> 14),
++				 entry[2] >> 8, entry[2] & 0xff,
++				 entry[1] >> 8, entry[1] & 0xff,
++				 entry[0] >> 8, entry[0] & 0xff);
++
++		addr = next + 1;
++	}
++
++	val->value.s = buf;
++	val->len = len;
++
++	return 0;
++}
++
+ static struct switch_attr rtl8367b_globals[] = {
+ 	{
+ 		.type = SWITCH_TYPE_INT,
+@@ -1393,6 +1666,12 @@ static struct switch_attr rtl8367b_globals[] = {
+ 		.set = rtl8367b_sw_set_max_length,
+ 		.get = rtl8367b_sw_get_max_length,
+ 		.max = 3,
++	}, {
++		.type = SWITCH_TYPE_STRING,
++		.name = "arl_table",
++		.description = "Get ARL table (RTL8367S-VB only)",
++		.set = NULL,
++		.get = rtl8367d_sw_get_arl_table,
+ 	}
+ };
+ 
 diff --git a/target/linux/qualcommax/dts/ipq5018-deco-x50-v1.dts b/target/linux/qualcommax/dts/ipq5018-deco-x50-v1.dts
 new file mode 100644
 index 0000000..ae01f8f
@@ -690,7 +804,7 @@ index ac20725..4cdd383 100644
  	$(call Device/FitImage)
  	$(call Device/UbiFit)
 diff --git a/target/linux/qualcommax/ipq50xx/base-files/etc/board.d/02_network b/target/linux/qualcommax/ipq50xx/base-files/etc/board.d/02_network
-index d4cc586..1680df2 100644
+index d4cc586..1dae4fa 100644
 --- a/target/linux/qualcommax/ipq50xx/base-files/etc/board.d/02_network
 +++ b/target/linux/qualcommax/ipq50xx/base-files/etc/board.d/02_network
 @@ -45,6 +45,11 @@ ipq50xx_setup_interfaces()
@@ -705,7 +819,7 @@ index d4cc586..1680df2 100644
  	tplink,eap650-outdoor-v1|\
  	tplink,re700x)
  		ucidef_set_interface_lan "lan" "dhcp"
-@@ -71,6 +76,13 @@ ipq50xx_setup_macs()
+@@ -71,6 +76,16 @@ ipq50xx_setup_macs()
  		# DSA conduit's address on every boot - pin it to the label MAC
  		ucidef_set_network_device_mac "eth0" "$label_mac"
  		;;
@@ -715,6 +829,9 @@ index d4cc586..1680df2 100644
 +		ucidef_set_interface_macaddr "lan" "$label_mac"
 +		ucidef_set_interface_macaddr "wan" "$(macaddr_add "$label_mac" 1)"
 +		ucidef_set_label_macaddr "$label_mac"
++		# gmac1 has no nvmem MAC source, so stmmac would randomise the
++		# switch conduit's address on every boot - pin it to the label MAC
++		ucidef_set_network_device_mac "eth0" "$label_mac"
 +		;;
  	tplink,eap650-outdoor-v1|\
  	tplink,re700x)
