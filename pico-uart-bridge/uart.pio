@@ -1,0 +1,66 @@
+; 8N1 UART on arbitrary pins, from pico-examples (pio/uart_tx, pio/uart_rx).
+; Both programs run at 8 PIO cycles per bit.
+
+.program uart_tx
+.side_set 1 opt
+    pull       side 1 [7]  ; idle high, wait for data
+    set x, 7   side 0 [7]  ; start bit
+bitloop:
+    out pins, 1
+    jmp x-- bitloop   [6]
+
+.program uart_rx
+start:
+    wait 0 pin 0           ; wait for start bit
+    set x, 7    [10]       ; then delay to the middle of the first data bit
+bitloop:
+    in pins, 1
+    jmp x-- bitloop [6]
+    jmp pin good_stop      ; stop bit must be high
+
+    irq 4 rel              ; framing error or break: drop the byte
+    wait 1 pin 0
+    jmp start
+
+good_stop:
+    push
+
+% c-sdk {
+#include "hardware/clocks.h"
+#include "hardware/gpio.h"
+
+static inline float uart_pio_clkdiv(uint baud) {
+    return (float)clock_get_hz(clk_sys) / (8 * baud);
+}
+
+static inline void uart_tx_program_init(PIO pio, uint sm, uint offset, uint pin, uint baud) {
+    pio_sm_set_pins_with_mask(pio, sm, 1u << pin, 1u << pin);
+    pio_sm_set_pindirs_with_mask(pio, sm, 1u << pin, 1u << pin);
+    pio_gpio_init(pio, pin);
+
+    pio_sm_config c = uart_tx_program_get_default_config(offset);
+    sm_config_set_out_shift(&c, true, false, 32);
+    sm_config_set_out_pins(&c, pin, 1);
+    sm_config_set_sideset_pins(&c, pin);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
+    sm_config_set_clkdiv(&c, uart_pio_clkdiv(baud));
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+
+static inline void uart_rx_program_init(PIO pio, uint sm, uint offset, uint pin, uint baud) {
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, false);
+    pio_gpio_init(pio, pin);
+    /* no pull-up: it would push 3.3 V into the Deco's 1.8 V TX line */
+    gpio_disable_pulls(pin);
+
+    pio_sm_config c = uart_rx_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, pin);
+    sm_config_set_jmp_pin(&c, pin);
+    sm_config_set_in_shift(&c, true, false, 32);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+    sm_config_set_clkdiv(&c, uart_pio_clkdiv(baud));
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}
